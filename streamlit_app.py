@@ -16,7 +16,21 @@ from ui.processor import CoachProcessor
 
 st.set_page_config(page_title="AI Fitness Coach", page_icon="\U0001F3CB", layout="wide")
 
-RTC_CONFIG = {"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}
+RTC_CONFIG = {
+    "iceServers": [
+        {"urls": ["stun:stun.l.google.com:19302"]},
+        {"urls": ["stun:openrelay.metered.ca:80"]},
+        {
+            "urls": [
+                "turn:openrelay.metered.ca:80",
+                "turn:openrelay.metered.ca:443",
+                "turns:openrelay.metered.ca:443?transport=tcp",
+            ],
+            "username": "openrelayproject",
+            "credential": "openrelayproject",
+        },
+    ]
+}
 ss = st.session_state
 ss.setdefault("stage", "select")
 ss.setdefault("paused", False)
