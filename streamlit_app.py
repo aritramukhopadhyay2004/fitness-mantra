@@ -19,16 +19,9 @@ st.set_page_config(page_title="AI Fitness Coach", page_icon="\U0001F3CB", layout
 RTC_CONFIG = {
     "iceServers": [
         {"urls": ["stun:stun.l.google.com:19302"]},
-        {"urls": ["stun:openrelay.metered.ca:80"]},
-        {
-            "urls": [
-                "turn:openrelay.metered.ca:80",
-                "turn:openrelay.metered.ca:443",
-                "turns:openrelay.metered.ca:443?transport=tcp",
-            ],
-            "username": "openrelayproject",
-            "credential": "openrelayproject",
-        },
+        {"urls": ["stun:stun1.l.google.com:19302"]},
+        {"urls": ["stun:stun2.l.google.com:19302"]},
+        {"urls": ["stun:stun.cloudflare.com:3478"]},
     ]
 }
 ss = st.session_state
@@ -91,7 +84,7 @@ def page_train() -> None:
         rtc_configuration=RTC_CONFIG,
         media_stream_constraints={"video": {"width": {"ideal": 1280}, "height": {"ideal": 720}}, "audio": False},
         # the component lives in an iframe, so page CSS cannot reach the <video>: size it here
-        video_html_attrs={"autoPlay": True, "controls": True, "muted": True,
+        video_html_attrs={"autoPlay": True, "controls": True, "muted": True, "playsInline": True,
                           "style": {"width": "100%", "background": "#000", "borderRadius": "10px", "objectFit": "contain"}},
         desired_playing_state=True,
         async_processing=True,
