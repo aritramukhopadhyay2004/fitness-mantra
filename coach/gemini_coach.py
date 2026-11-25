@@ -20,12 +20,24 @@ Under 150 words. Plain text, no markdown tables. Not medical advice: if the pers
 mentions pain or injury, tell them to stop and consult a professional."""
 
 
-def build_prompt(summary: dict, language: str = "English") -> str:
+def build_prompt(
+    summary: dict,
+    language: str = "English",
+    live_suggestions: Optional[list[dict]] = None,
+    achievements: Optional[list[str]] = None,
+) -> str:
     slim = {k: v for k, v in summary.items() if k != "records"}
     slim["per_rep"] = [
         {k: r[k] for k in ("set", "rep", "counted", "depth_pct", "duration_s", "issues")}
         for r in summary.get("records", [])
     ][:60]
+    if achievements:
+        slim["achievements_and_records_met"] = achievements
+    if live_suggestions:
+        slim["live_suggestions_given"] = [
+            {"set": s.get("set"), "rep": s.get("rep"), "tip": s.get("suggestion")}
+            for s in live_suggestions[-20:]
+        ]
     return f"{SYSTEM_RULES}\n\nRespond in {language}.\n\nSESSION DATA (JSON):\n{json.dumps(slim, indent=2)}"
 
 
@@ -46,25 +58,95 @@ def local_feedback(summary: dict) -> str:
     return "\n".join(lines)
 
 
-def gemini_feedback(summary: dict, api_key: str, model: Optional[str] = None, language: str = "English") -> str:
+def _generate_text(api_key: str, prompt: str, model: Optional[str] = None) -> str:
     from google import genai
 
     client = genai.Client(api_key=api_key)
-    resp = client.models.generate_content(
-        model=model or os.getenv("GEMINI_MODEL", "gemini-2.5-flash"),
-        contents=build_prompt(summary, language),
-    )
-    return (resp.text or "").strip()
+    primary = model or os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
+    candidates = [primary] if primary == "gemini-3.8-flash-lite" else [primary, "gemini-3.8-flash-lite"]
+    last_err = None
+    for m in candidates:
+        try:
+            resp = client.models.generate_content(model=m, contents=prompt)
+            text = (resp.text or "").strip()
+            if text:
+                return text
+        except Exception as e:
+            last_err = e
+    if last_err:
+        raise last_err
+    return ""
 
 
-def get_feedback(summary: dict, api_key: Optional[str] = None, language: str = "English") -> tuple[str, str]:
+def gemini_feedback(
+    summary: dict,
+    api_key: str,
+    model: Optional[str] = None,
+    language: str = "English",
+    live_suggestions: Optional[list[dict]] = None,
+    achievements: Optional[list[str]] = None,
+) -> str:
+    prompt = build_prompt(summary, language, live_suggestions, achievements)
+    return _generate_text(api_key, prompt, model=model)
+
+
+def get_feedback(
+    summary: dict,
+    api_key: Optional[str] = None,
+    language: str = "English",
+    live_suggestions: Optional[list[dict]] = None,
+    achievements: Optional[list[str]] = None,
+) -> tuple[str, str]:
     """Returns (text, source) where source is 'gemini' or 'local' (with reason if it fell back)."""
     key = api_key or os.getenv("GEMINI_API_KEY")
     if key:
         try:
-            text = gemini_feedback(summary, key, language=language)
+            text = gemini_feedback(
+                summary,
+                key,
+                language=language,
+                live_suggestions=live_suggestions,
+                achievements=achievements,
+            )
             if text:
                 return text, "gemini"
         except Exception as e:
-            return local_feedback(summary), f"local (Gemini failed: {type(e).__name__})"
+            return local_feedback(summary), f"local (Gemini failed: {type(e).__name__}: {e})"
     return local_feedback(summary), "local (no GEMINI_API_KEY set)"
+
+
+def _local_live_tip(snapshot: dict, achievements: list[str]) -> str:
+    last = snapshot.get("last_rep") or {}
+    issues = last.get("issues") or []
+    depth = last.get("depth_pct", 0)
+    prefix = f"Milestone: {achievements[0]} " if achievements else ""
+    if not last.get("counted", True):
+        return f"{prefix}Partial rep ({depth}% depth) — lower to the green target line."
+    if issues:
+        return f"{prefix}Rep {snapshot.get('reps_counted', 0)} counted ({depth}% depth). Fix: {issues[0]}."
+    return f"{prefix}Clean rep ({depth}% depth)! Keep that steady tempo and posture."
+
+
+def live_coach_tip(
+    snapshot: dict,
+    achievements: list[str],
+    api_key: Optional[str] = None,
+    language: str = "English",
+) -> tuple[str, str]:
+    """Generate a short real-time coaching tip during a live workout."""
+    key = api_key or os.getenv("GEMINI_API_KEY")
+    if not key:
+        return _local_live_tip(snapshot, achievements), "local"
+    try:
+        prompt = (
+            "You are a live strength & posture coach watching a workout in real time. "
+            f"Respond in {language} in 1-2 short sentences (under 35 words). "
+            "Highlight any achievement/record met and give one specific form or posture cue based ONLY on this JSON:\n"
+            f"{json.dumps({'snapshot': snapshot, 'new_achievements': achievements})}"
+        )
+        text = _generate_text(key, prompt)
+        if text:
+            return text, "gemini"
+    except Exception as e:
+        return _local_live_tip(snapshot, achievements), f"local ({type(e).__name__})"
+    return _local_live_tip(snapshot, achievements), "local"

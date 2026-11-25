@@ -85,6 +85,16 @@
       pointer-events: none;
     }
     .msg.hidden { display: none; }
+    .coach-bar {
+      padding: 10px 14px;
+      border-radius: 8px;
+      background: rgba(255, 255, 255, 0.06);
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      font-size: 14px;
+      line-height: 1.4;
+      color: #eef1f6;
+    }
+    .coach-bar strong { color: #7ae582; }
   </style>
 </head>
 <body>
@@ -99,6 +109,9 @@
       <video id="video" autoplay playsinline muted></video>
       <canvas id="canvas" width="1280" height="720"></canvas>
       <div id="msg" class="msg">Loading pose model and camera…</div>
+    </div>
+    <div class="coach-bar" id="coachBar">
+      <strong>AI Coach:</strong> <span id="coachTip">Complete your first rep to receive live Gemini form &amp; posture coaching.</span>
     </div>
   </div>
 
@@ -251,6 +264,8 @@
         this.angleEma = new EMA(0.45);
         this.checkEma = Object.fromEntries((ex.checks || []).map(c => [c.key, new EMA(0.45)]));
         this.flash = null;
+        this.cleanStreak = 0;
+        this.eventSeq = 0;
       }
       _pt(pts, side, joint) {
         const p = pts[`${side}_${joint}`];
@@ -385,16 +400,21 @@
         this.records.push(rec);
 
         if (!counted) {
+          this.cleanStreak = 0;
           this._flashNow(`${ex.cue_low} (rep not counted)`, "warn", t, 2.0);
+          this._emitRep(rec, false);
           return;
         }
         this.repsInSet += 1;
+        this.cleanStreak = rec.issues.length === 0 ? this.cleanStreak + 1 : 0;
         const txt = rec.issues.length === 0
           ? `Rep ${this.repsInSet} - nice depth`
           : `Rep ${this.repsInSet} - ${rec.issues[0]}`;
         this._flashNow(txt, rec.issues.length === 0 ? "ok" : "warn", t);
 
+        let setCompleted = false;
         if (this.repsInSet >= this.repsPerSet) {
+          setCompleted = true;
           if (this.setNo >= this.sets) {
             this.finished = true;
           } else {
@@ -404,6 +424,32 @@
             this.sm.reset();
           }
         }
+        this._emitRep(rec, setCompleted);
+      }
+      _emitRep(rec, setCompleted) {
+        this.eventSeq += 1;
+        const counted = this.records.filter(r => r.counted);
+        const cleanCount = counted.filter(r => r.issues.length === 0).length;
+        const setsDone = this.setNo - 1 + (this.finished ? 1 : 0);
+        post("streamlit:setComponentValue", {
+          value: {
+            event: "rep",
+            event_id: `${currentCfgKey}_${this.eventSeq}`,
+            snapshot: {
+              exercise: this.ex.label,
+              set_no: this.setNo,
+              sets_total: this.sets,
+              sets_completed: setsDone,
+              set_completed: setCompleted,
+              reps_in_set: this.repsInSet,
+              reps_target: this.repsPerSet,
+              reps_counted: counted.length,
+              clean_reps: cleanCount,
+              clean_streak: this.cleanStreak,
+              last_rep: rec,
+            },
+          },
+        });
       }
       _cue(st, bad, t) {
         if (this.flash && t < this.flash.until) return [this.flash.text, this.flash.level];
@@ -589,6 +635,7 @@
     const btnPause = document.getElementById("btnPause");
     const btnEnd = document.getElementById("btnEnd");
     const btnFs = document.getElementById("btnFs");
+    const coachTipEl = document.getElementById("coachTip");
 
     let landmarker = null;
     let engine = null;
@@ -619,7 +666,13 @@
       if (rafId) cancelAnimationFrame(rafId);
       if (stream) stream.getTracks().forEach(t => t.stop());
       const summary = engine ? engine.summary() : { records: [] };
-      post("streamlit:setComponentValue", { value: summary });
+      post("streamlit:setComponentValue", {
+        value: {
+          event: "end",
+          event_id: `end_${Date.now()}`,
+          summary,
+        },
+      });
     });
 
     async function initPoseAndCamera() {
@@ -740,6 +793,9 @@
       const data = event.data;
       if (!data || data.type !== "streamlit:render") return;
       const args = data.args || {};
+      if (args.live_ai_tip) {
+        coachTipEl.textContent = args.live_ai_tip;
+      }
       if (!args.exercise) return;
       const key = `${args.exercise.key}_${args.reps}_${args.sets}_${args.rest_s}`;
       if (key !== currentCfgKey) {

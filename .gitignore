@@ -3,3 +3,4 @@ __pycache__/
 models/*.part
 .env
 .streamlit/secrets.toml
+data/
