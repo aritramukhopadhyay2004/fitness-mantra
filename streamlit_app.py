@@ -15,7 +15,7 @@ import streamlit.components.v1 as components
 
 from coach.gemini_coach import get_feedback, live_coach_tip
 from coach.records import check_live_achievements, load_records, save_session_record
-from exercises.configs import EXERCISES
+from exercises.configs import ALL_EXERCISES, CATEGORIES, EXERCISES, WORKOUT_SPLITS
 
 st.set_page_config(page_title="AI Fitness Coach", page_icon="\U0001F3CB", layout="wide")
 
@@ -90,22 +90,76 @@ def render_datewise_records(store: dict) -> None:
 # ------------------------------------------------------------------ select page
 def page_select() -> None:
     st.title("\U0001F3CB AI Fitness Coach")
-    st.caption("Live posture tracking, real-time Gemini coaching, achievements, and datewise training records.")
+    st.caption(
+        f"{len(EXERCISES)} exercises across Upper Body, Lower Body, Core, Conditioning & Mobility — "
+        "tuned with ACSM/NSCA biomechanics, live Gemini coaching & datewise records."
+    )
 
-    key = st.radio("Choose your exercise", list(EXERCISES), format_func=lambda k: EXERCISES[k].label, horizontal=True)
+    f1, f2, f3, f4 = st.columns([1.2, 1.2, 1.3, 1.5])
+    split = f1.selectbox("Workout split", WORKOUT_SPLITS, index=0)
+    cat = f2.selectbox("Category", ["All"] + CATEGORIES, index=0)
+
+    pool = list(ALL_EXERCISES)
+    if split != "All":
+        pool = [e for e in pool if split in e.splits]
+    if cat != "All":
+        pool = [e for e in pool if e.category == cat]
+
+    groups = ["All"] + list(dict.fromkeys(e.muscle_group for e in pool))
+    group = f3.selectbox("Muscle / Focus", groups, index=0)
+    if group != "All":
+        pool = [e for e in pool if e.muscle_group == group]
+
+    query = f4.text_input("Search exercise", placeholder="e.g. bench, squat, plank...").strip().lower()
+    if query:
+        pool = [
+            e for e in pool
+            if query in e.label.lower() or query in e.primary_muscle.lower() or query in e.equipment.lower()
+        ]
+
+    if not pool:
+        st.warning("No exercises match those filters. Try resetting one of the filters above.")
+        render_datewise_records(ss.training_store)
+        return
+
+    keys = [e.key for e in pool]
+    key = st.selectbox(
+        f"Choose your exercise ({len(pool)} available)",
+        keys,
+        format_func=lambda k: f"{EXERCISES[k].label} · {EXERCISES[k].muscle_group} ({EXERCISES[k].equipment})",
+    )
     ex = EXERCISES[key]
+
     c1, c2, c3, c4 = st.columns(4)
-    reps = c1.number_input("Reps per set", 1, 50, ex.default_reps)
+    rep_label = "Hold seconds per set" if ex.mode == "hold" else "Reps per set"
+    reps = c1.number_input(rep_label, 1, 180, ex.default_reps)
     sets = c2.number_input("Sets", 1, 10, 3)
     rest = c3.number_input("Rest between sets (s)", 5, 300, 45, step=5)
     lang = c4.selectbox("Coach language", ["English", "Hindi", "Telugu", "Tamil", "Spanish"], index=0)
 
     with st.container(border=True):
-        st.markdown(f"**Camera setup - {ex.view}**  \n{ex.setup_tip}")
+        m_sec = f" · Secondary: {', '.join(ex.secondary_muscles)}" if ex.secondary_muscles else ""
         st.markdown(
-            f"Full rep = joint angle from **> {ex.extended_above:.0f}°** down to "
-            f"**< {ex.flexed_below:.0f}°** (green target line). Partial reps are not counted."
+            f"**{ex.label}** — `{ex.category}` → `{ex.muscle_group}` · **{ex.exercise_type}** · "
+            f"**{ex.equipment}** · *{ex.difficulty}*"
         )
+        st.markdown(f"**Target Muscles:** {ex.primary_muscle}{m_sec}")
+        st.markdown(f"**Camera setup ({ex.view}):** {ex.setup_tip}")
+        if ex.mode == "hold":
+            st.markdown(f"**Target posture range:** {ex.hold_min:.0f}° – {ex.hold_max:.0f}° (hold steady)")
+        elif ex.direction == "extend":
+            st.markdown(
+                f"**Full rep:** joint angle from **< {ex.flexed_below:.0f}°** up to "
+                f"**> {ex.extended_above:.0f}°** (green target line)."
+            )
+        else:
+            st.markdown(
+                f"**Full rep:** joint angle from **> {ex.extended_above:.0f}°** down to "
+                f"**< {ex.flexed_below:.0f}°** (green target line)."
+            )
+        if ex.biomechanics_note:
+            st.caption(f"Biomechanics: {ex.biomechanics_note}")
+
     if st.button("▶  Start training", type="primary", use_container_width=True):
         ss.update(
             stage="train",

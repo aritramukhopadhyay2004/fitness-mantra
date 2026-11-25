@@ -102,8 +102,14 @@ def draw_overlay(img: np.ndarray, st: FrameState, ex: Exercise, pts: dict, pause
 
     if st.visible and st.triplet:
         a, b, c = st.triplet
-        # target (ghost) position of the end that travels (hip in a squat, wrist in a curl)
-        g = ghost_limb_end(c, b, a, ex.flexed_below) if ex.moving_end == "a" else ghost_limb_end(a, b, c, ex.flexed_below)
+        # target (ghost) position of the end that travels
+        if ex.mode == "hold":
+            target_deg = (ex.hold_min + ex.hold_max) / 2
+        elif ex.direction == "extend":
+            target_deg = ex.extended_above
+        else:
+            target_deg = ex.flexed_below
+        g = ghost_limb_end(c, b, a, target_deg) if ex.moving_end == "a" else ghost_limb_end(a, b, c, target_deg)
         if g:
             col = GREEN if st.pct >= 1.0 else (140, 235, 150)
             dashed_line(img, _i(b), _i(g), col, max(2, int(3 * k)))

@@ -118,3 +118,35 @@ def test_moving_end_config():
     g = ghost_limb_end(c, b, a, EXERCISES["squat"].flexed_below)
     assert angle_deg(g, b, c) == pytest.approx(EXERCISES["squat"].flexed_below, abs=0.01)
     assert math.hypot(g[0] - b[0], g[1] - b[1]) == pytest.approx(math.hypot(a[0] - b[0], a[1] - b[1]))
+
+
+def test_exercise_catalog_integrity():
+    valid_joints = {"shoulder", "elbow", "wrist", "hip", "knee", "ankle"}
+    assert len(EXERCISES) >= 70
+    for ex in EXERCISES.values():
+        assert len(ex.joints) == 3
+        assert all(j in valid_joints for j in ex.joints)
+        assert ex.direction in ("flex", "extend")
+        assert ex.mode in ("rep", "hold")
+        assert ex.flexed_below < ex.extended_above
+        for chk in ex.checks:
+            assert all(j in valid_joints for j in chk.joints)
+
+
+def test_extend_direction_counts_full_and_skips_partial():
+    e = CoachEngine(EXERCISES["leg_extension"], reps_per_set=5, sets=1, rest_s=10)
+    # Full extension: 90 -> 170 -> 90; partial extension: 90 -> 135 -> 90
+    full_rep = sweep(90, 170, 12) + sweep(170, 90, 12)
+    partial_rep = sweep(90, 135, 10) + sweep(135, 90, 10)
+    _, t = run(e, full_rep + partial_rep, 0.0)
+    s = e.summary()
+    assert s["reps_counted"] == 1
+    assert s["partial_reps"] == 1
+
+
+def test_hold_mode_accumulates_seconds():
+    e = CoachEngine(EXERCISES["wall_sit"], reps_per_set=30, sets=1, rest_s=10)
+    # Hold at 90 deg knee angle for 2.5 seconds (75 frames at 30 fps)
+    _, t = run(e, [90.0] * 76, 0.0)
+    s = e.summary()
+    assert s["reps_counted"] >= 2

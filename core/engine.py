@@ -46,7 +46,7 @@ class CoachEngine:
         self.reps_per_set = reps_per_set
         self.sets = sets
         self.rest_s = rest_s
-        self.sm = RepStateMachine(ex.extended_above, ex.flexed_below, ex.leave_margin)
+        self.sm = RepStateMachine(ex.extended_above, ex.flexed_below, ex.leave_margin, ex.direction)
         self.set_no = 1
         self.reps_in_set = 0
         self.finished = False
@@ -56,6 +56,9 @@ class CoachEngine:
         self._angle_ema = EMA(0.45)
         self._check_ema = {c.key: EMA(0.45) for c in ex.checks}
         self._flash: Optional[tuple[str, str, float]] = None   # text, level, until
+        self._hold_acc: float = 0.0
+        self._last_t: Optional[float] = None
+        self._hold_issues: set[str] = set()
 
     # ---------------------------------------------------------------- helpers
     def _pt(self, pts: dict, side: str, joint: str):
@@ -131,8 +134,14 @@ class CoachEngine:
         angle = self._angle_ema.update(raw)
         st.visible, st.side, st.angle = True, side, angle
         st.triplet = [(a[0], a[1]), (b[0], b[1]), (c[0], c[1])]
-        span = ex.extended_above - ex.flexed_below
-        st.pct = max(0.0, min(1.0, (ex.extended_above - angle) / span))
+        span = max(ex.extended_above - ex.flexed_below, 1.0)
+        if ex.mode == "hold":
+            in_band = ex.hold_min <= angle <= ex.hold_max
+            st.pct = 1.0 if in_band else 0.0
+        elif ex.direction == "extend":
+            st.pct = max(0.0, min(1.0, (angle - ex.flexed_below) / span))
+        else:
+            st.pct = max(0.0, min(1.0, (ex.extended_above - angle) / span))
 
         bad = self._violations(side, pts)
         st.issue_keys = [c_.key for c_ in bad]
@@ -145,6 +154,35 @@ class CoachEngine:
                 return st
             self.rest_until = None
             self.sm.reset()
+
+        # ---- hold mode (isometric / mobility seconds)
+        if ex.mode == "hold":
+            dt = 0.0 if self._last_t is None else max(0.0, min(t - self._last_t, 0.5))
+            self._last_t = t
+            in_band = ex.hold_min <= angle <= ex.hold_max
+            st.phase = BOTTOM if in_band else TOP
+            if in_band:
+                self._hold_acc += dt
+                self._hold_issues |= {c_.key for c_ in bad}
+                if self._hold_acc >= 1.0:
+                    self._hold_acc -= 1.0
+                    self._on_event(
+                        {
+                            "kind": "rep",
+                            "min_angle": angle,
+                            "peak_angle": angle,
+                            "duration": 1.0,
+                            "issues": sorted(self._hold_issues),
+                        },
+                        t,
+                    )
+                    self._hold_issues.clear()
+                    st.reps_in_set, st.set_no, st.finished = self.reps_in_set, self.set_no, self.finished
+            else:
+                self._hold_acc = 0.0
+                self._hold_issues.clear()
+            st.cue, st.cue_level = self._cue(st, bad, t)
+            return st
 
         # ---- rep detection (form issues only count while a rep is in progress)
         active_issues = {c_.key for c_ in bad} if self.sm.state != TOP else set()
@@ -161,13 +199,22 @@ class CoachEngine:
 
     def _on_event(self, ev: dict, t: float) -> None:
         ex = self.ex
-        depth = (ex.extended_above - ev["min_angle"]) / (ex.extended_above - ex.flexed_below)
+        span = max(ex.extended_above - ex.flexed_below, 1.0)
+        if ex.mode == "hold":
+            depth = 1.0
+            key_angle = ev["min_angle"]
+        elif ex.direction == "extend":
+            key_angle = ev.get("peak_angle", ev["min_angle"])
+            depth = (key_angle - ex.flexed_below) / span
+        else:
+            key_angle = ev["min_angle"]
+            depth = (ex.extended_above - key_angle) / span
         counted = ev["kind"] == "rep"
         rec = {
             "set": self.set_no,
             "rep": self.reps_in_set + 1 if counted else None,
             "counted": counted,
-            "min_angle": round(ev["min_angle"], 1),
+            "min_angle": round(key_angle, 1),
             "depth_pct": round(max(0.0, min(depth, 1.2)) * 100),
             "duration_s": round(ev["duration"], 2),
             "issues": [c.cue for c in ex.checks if c.key in ev["issues"]],
@@ -192,17 +239,26 @@ class CoachEngine:
                 self.sm.reset()
 
     def _cue(self, st: FrameState, bad: list[FormCheck], t: float) -> tuple[str, str]:
+        ex = self.ex
         if self._flash and t < self._flash[2]:
             return self._flash[0], self._flash[1]
         if st.finished:
             return "Workout complete - great job!", "ok"
+        if ex.mode == "hold":
+            if bad:
+                return bad[0].cue, "warn"
+            if st.angle is not None and ex.hold_min <= st.angle <= ex.hold_max:
+                return f"Hold steady ({self.reps_in_set}/{self.reps_per_set}s)", "ok"
+            return ex.cue_low, "warn"
         if st.phase != TOP and bad:
             return bad[0].cue, "warn"
         if st.phase == BOTTOM:
-            return "Good depth - now drive up", "ok"
+            return "Good depth - now drive up" if ex.direction == "flex" else "Full contraction - lower with control", "ok"
         if st.phase == MOVING and st.angle is not None:
-            if st.angle > self.sm.min_angle + 12 and self.sm.min_angle > self.ex.flexed_below:
-                return self.ex.cue_low, "warn"
+            if ex.direction == "flex" and st.angle > self.sm.min_angle + 12 and self.sm.min_angle > ex.flexed_below:
+                return ex.cue_low, "warn"
+            if ex.direction == "extend" and st.angle < self.sm.peak_angle - 12 and self.sm.peak_angle < ex.extended_above:
+                return ex.cue_low, "warn"
         return "", "info"
 
     # ---------------------------------------------------------------- summary
