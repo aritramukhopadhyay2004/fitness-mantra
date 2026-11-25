@@ -59,7 +59,10 @@ class MediaPipePose:
         self._w = detect_width
         self._last_ts = 0
         opts = vision.PoseLandmarkerOptions(
-            base_options=mp_python.BaseOptions(model_asset_path=ensure_model(variant)),
+            base_options=mp_python.BaseOptions(
+                model_asset_buffer=Path(ensure_model(variant)).read_bytes(),
+                delegate=mp_python.BaseOptions.Delegate.CPU,
+            ),
             running_mode=vision.RunningMode.VIDEO,
             num_poses=1,
             min_pose_detection_confidence=0.5,

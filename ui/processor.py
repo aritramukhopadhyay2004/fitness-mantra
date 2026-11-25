@@ -1,6 +1,8 @@
 """streamlit-webrtc video processor: camera frame -> pose -> engine -> overlay -> frame."""
 from __future__ import annotations
 
+import logging
+import sys
 import threading
 import time
 from typing import Optional
@@ -12,6 +14,8 @@ from streamlit_webrtc import VideoProcessorBase
 from core.engine import CoachEngine, FrameState
 from exercises.configs import EXERCISES
 from ui.overlay import draw_overlay
+
+logger = logging.getLogger(__name__)
 
 
 class CoachProcessor(VideoProcessorBase):
@@ -40,7 +44,9 @@ class CoachProcessor(VideoProcessorBase):
                 from core.pose import MediaPipePose
                 self.tracker = MediaPipePose("lite")
             except Exception as e:              # e.g. model download blocked
+                logger.exception("Failed to initialize MediaPipePose")
                 self.model_error = f"{type(e).__name__}: {e}"
+                print(f"Pose model error: {self.model_error}", file=sys.stderr, flush=True)
         return self.tracker is not None
 
     # called from the video thread, once per frame
@@ -57,6 +63,8 @@ class CoachProcessor(VideoProcessorBase):
 
         if not self._ensure_tracker():
             cv2.putText(img, "Pose model unavailable", (30, 60), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 2)
+            if self.model_error:
+                cv2.putText(img, self.model_error[:90], (30, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 255), 1)
             return av.VideoFrame.from_ndarray(img, format="bgr24")
 
         pts = self.tracker.detect(img)
