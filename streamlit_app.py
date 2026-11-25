@@ -4,26 +4,22 @@ Flow: choose exercise -> full-screen live camera with coaching overlay -> summar
 """
 from __future__ import annotations
 
+from dataclasses import asdict
 import os
+from pathlib import Path
 
 import pandas as pd
 import streamlit as st
-from streamlit_webrtc import webrtc_streamer
+import streamlit.components.v1 as components
 
 from coach.gemini_coach import get_feedback
 from exercises.configs import EXERCISES
-from ui.processor import CoachProcessor
 
 st.set_page_config(page_title="AI Fitness Coach", page_icon="\U0001F3CB", layout="wide")
 
-RTC_CONFIG = {
-    "iceServers": [
-        {"urls": ["stun:stun.l.google.com:19302"]},
-        {"urls": ["stun:stun1.l.google.com:19302"]},
-        {"urls": ["stun:stun2.l.google.com:19302"]},
-        {"urls": ["stun:stun.cloudflare.com:3478"]},
-    ]
-}
+_TRACKER_DIR = Path(__file__).resolve().parent / "ui" / "browser_tracker"
+_browser_tracker = components.declare_component("browser_tracker", path=str(_TRACKER_DIR))
+
 ss = st.session_state
 ss.setdefault("stage", "select")
 ss.setdefault("paused", False)
@@ -73,33 +69,16 @@ def page_select() -> None:
 def page_train() -> None:
     st.markdown(FULLSCREEN_CSS, unsafe_allow_html=True)
     cfg = ss.cfg
-    b1, b2, _ = st.columns([1, 1, 6])
-    if b1.button("▶ Resume" if ss.paused else "⏸ Pause", use_container_width=True):
-        ss.paused = not ss.paused
-    end = b2.button("⏹ End session", type="primary", use_container_width=True)
-
-    ctx = webrtc_streamer(
-        key="coach",
-        video_processor_factory=CoachProcessor,
-        rtc_configuration=RTC_CONFIG,
-        media_stream_constraints={"video": {"width": {"ideal": 1280}, "height": {"ideal": 720}}, "audio": False},
-        # the component lives in an iframe, so page CSS cannot reach the <video>: size it here
-        video_html_attrs={"autoPlay": True, "controls": True, "muted": True, "playsInline": True,
-                          "style": {"width": "100%", "background": "#000", "borderRadius": "10px", "objectFit": "contain"}},
-        desired_playing_state=True,
-        async_processing=True,
+    ex_dict = asdict(EXERCISES[cfg["key"]])
+    summary = _browser_tracker(
+        exercise=ex_dict,
+        reps=cfg["reps"],
+        sets=cfg["sets"],
+        rest_s=cfg["rest"],
+        key=f"coach_{cfg['key']}_{cfg['reps']}_{cfg['sets']}_{cfg['rest']}",
     )
-    proc = ctx.video_processor
-    if proc:
-        proc.configure(cfg["key"], cfg["reps"], cfg["sets"], cfg["rest"])
-        proc.paused = ss.paused
-        if proc.model_error:
-            st.error(f"Pose model could not load: {proc.model_error}")
-    else:
-        st.info("Allow camera access in your browser, then step back so your full body is visible.")
-
-    if end:
-        ss.summary = proc.snapshot() if proc else None
+    if summary is not None:
+        ss.summary = summary
         ss.stage = "summary"
         st.rerun()
 

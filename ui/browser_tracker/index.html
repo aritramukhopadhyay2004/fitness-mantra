@@ -1,0 +1,756 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>AI Fitness Coach Tracker</title>
+  <style>
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0;
+      padding: 0;
+      background: transparent;
+      color: #f5f5f5;
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+    }
+    .wrap {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      width: 100%;
+    }
+    .toolbar {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+    button {
+      border: 1px solid rgba(255,255,255,0.18);
+      border-radius: 8px;
+      padding: 8px 14px;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      background: #262730;
+      color: #f5f5f5;
+      transition: background 0.15s ease;
+    }
+    button:hover { background: #343642; }
+    button.primary {
+      background: #ff4b4b;
+      border-color: #ff4b4b;
+      color: #fff;
+    }
+    button.primary:hover { background: #e03e3e; }
+    .status {
+      margin-left: auto;
+      font-size: 13px;
+      padding: 5px 10px;
+      border-radius: 999px;
+      background: rgba(255,255,255,0.08);
+      color: #d0d4dc;
+    }
+    .status.ok { background: rgba(90,220,110,0.18); color: #7ae582; }
+    .status.err { background: rgba(245,70,70,0.2); color: #ff8080; }
+    .stage {
+      position: relative;
+      width: 100%;
+      aspect-ratio: 16 / 9;
+      max-height: 78vh;
+      background: #0d0f14;
+      border-radius: 10px;
+      overflow: hidden;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    video { display: none; }
+    canvas {
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+      display: block;
+    }
+    .msg {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      text-align: center;
+      padding: 24px;
+      font-size: 16px;
+      color: #d0d4dc;
+      pointer-events: none;
+    }
+    .msg.hidden { display: none; }
+  </style>
+</head>
+<body>
+  <div class="wrap" id="root">
+    <div class="toolbar">
+      <button id="btnPause" type="button">⏸ Pause</button>
+      <button id="btnEnd" class="primary" type="button">⏹ End session</button>
+      <button id="btnFs" type="button">⛶ Fullscreen</button>
+      <span id="statusBadge" class="status">Initializing…</span>
+    </div>
+    <div class="stage" id="stage">
+      <video id="video" autoplay playsinline muted></video>
+      <canvas id="canvas" width="1280" height="720"></canvas>
+      <div id="msg" class="msg">Loading pose model and camera…</div>
+    </div>
+  </div>
+
+  <script type="module">
+    import { FilesetResolver, PoseLandmarker } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/vision_bundle.mjs";
+
+    // ---------------- Streamlit Component Protocol ----------------
+    const post = (type, extra = {}) =>
+      window.parent.postMessage({ isStreamlitMessage: true, type, ...extra }, "*");
+
+    function updateHeight() {
+      const h = document.getElementById("root").scrollHeight + 8;
+      post("streamlit:setFrameHeight", { height: h });
+    }
+    new ResizeObserver(updateHeight).observe(document.getElementById("root"));
+
+    // ---------------- Constants & Pose Geometry ----------------
+    const MIN_VIS = 0.3;
+    const VISIBLE_MEAN = 0.5;
+    const TOP = "TOP", MOVING = "MOVING", BOTTOM = "BOTTOM";
+
+    const LANDMARKS = {
+      left_shoulder: 11, right_shoulder: 12,
+      left_elbow: 13, right_elbow: 14,
+      left_wrist: 15, right_wrist: 16,
+      left_hip: 23, right_hip: 24,
+      left_knee: 25, right_knee: 26,
+      left_ankle: 27, right_ankle: 28,
+    };
+
+    const CONNECTIONS = [
+      ["left_shoulder", "right_shoulder"], ["left_hip", "right_hip"],
+      ["left_shoulder", "left_hip"], ["right_shoulder", "right_hip"],
+      ["left_shoulder", "left_elbow"], ["left_elbow", "left_wrist"],
+      ["right_shoulder", "right_elbow"], ["right_elbow", "right_wrist"],
+      ["left_hip", "left_knee"], ["left_knee", "left_ankle"],
+      ["right_hip", "right_knee"], ["right_knee", "right_ankle"],
+    ];
+
+    const COLORS = {
+      green: "rgb(90, 220, 110)",
+      ghost: "rgb(140, 235, 150)",
+      red: "rgb(245, 70, 70)",
+      amber: "rgb(255, 190, 0)",
+      white: "rgb(245, 245, 245)",
+      dark: "rgb(25, 25, 25)",
+    };
+
+    function angleDeg(a, b, c) {
+      const bax = a[0] - b[0], bay = a[1] - b[1];
+      const bcx = c[0] - b[0], bcy = c[1] - b[1];
+      const n = Math.hypot(bax, bay) * Math.hypot(bcx, bcy);
+      if (n < 1e-6) return null;
+      const cos = Math.max(-1, Math.min(1, (bax * bcx + bay * bcy) / n));
+      return (Math.acos(cos) * 180) / Math.PI;
+    }
+
+    function tiltFromVertical(top, bottom) {
+      const dx = top[0] - bottom[0];
+      const dy = bottom[1] - top[1];
+      return Math.abs((Math.atan2(dx, dy) * 180) / Math.PI);
+    }
+
+    function rotateVec(v, deg) {
+      const r = (deg * Math.PI) / 180;
+      const cs = Math.cos(r), sn = Math.sin(r);
+      return [v[0] * cs - v[1] * sn, v[0] * sn + v[1] * cs];
+    }
+
+    function ghostLimbEnd(a, b, c, targetDeg) {
+      const bax = a[0] - b[0], bay = a[1] - b[1];
+      const n = Math.hypot(bax, bay);
+      if (n < 1e-6) return null;
+      const len = Math.hypot(c[0] - b[0], c[1] - b[1]);
+      const cross = bax * (c[1] - b[1]) - bay * (c[0] - b[0]);
+      const sign = cross >= 0 ? 1 : -1;
+      const [rx, ry] = rotateVec([bax / n, bay / n], sign * targetDeg);
+      return [b[0] + rx * len, b[1] + ry * len];
+    }
+
+    class EMA {
+      constructor(alpha = 0.45) { this.alpha = alpha; this.val = null; }
+      reset() { this.val = null; }
+      update(x) {
+        this.val = this.val === null ? x : this.alpha * x + (1 - this.alpha) * this.val;
+        return this.val;
+      }
+    }
+
+    class RepStateMachine {
+      constructor(ext, flexed, leaveMargin = 15) {
+        this.ext = ext;
+        this.flexed = flexed;
+        this.leave = ext - leaveMargin;
+        this.state = TOP;
+        this.t0 = 0;
+        this.minAngle = 180;
+        this.issues = new Set();
+      }
+      reset() {
+        this.state = TOP;
+        this.minAngle = 180;
+        this.issues.clear();
+      }
+      update(angle, t, issues) {
+        if (this.state === TOP) {
+          if (angle < this.leave) {
+            this.state = MOVING;
+            this.t0 = t;
+            this.minAngle = angle;
+            this.issues = new Set(issues);
+          }
+          return null;
+        }
+        this.minAngle = Math.min(this.minAngle, angle);
+        for (const k of issues) this.issues.add(k);
+
+        if (this.state === MOVING && angle <= this.flexed) {
+          this.state = BOTTOM;
+          return null;
+        }
+        if (angle >= this.ext) {
+          const kind = this.state === BOTTOM ? "rep" : "partial";
+          const ev = {
+            kind,
+            min_angle: this.minAngle,
+            duration: t - this.t0,
+            issues: Array.from(this.issues).sort(),
+          };
+          this.state = TOP;
+          return ev;
+        }
+        return null;
+      }
+    }
+
+    class CoachEngine {
+      constructor(ex, repsPerSet, sets, restS) {
+        this.ex = ex;
+        this.repsPerSet = repsPerSet;
+        this.sets = sets;
+        this.restS = restS;
+        this.sm = new RepStateMachine(ex.extended_above, ex.flexed_below, ex.leave_margin ?? 15);
+        this.setNo = 1;
+        this.repsInSet = 0;
+        this.finished = false;
+        this.restUntil = null;
+        this.records = [];
+        this.side = null;
+        this.angleEma = new EMA(0.45);
+        this.checkEma = Object.fromEntries((ex.checks || []).map(c => [c.key, new EMA(0.45)]));
+        this.flash = null;
+      }
+      _pt(pts, side, joint) {
+        const p = pts[`${side}_${joint}`];
+        return p && p[2] >= MIN_VIS ? p : null;
+      }
+      _sideScore(pts, side) {
+        let sum = 0;
+        for (const j of this.ex.joints) {
+          const p = pts[`${side}_${j}`];
+          if (!p || p[2] < MIN_VIS) return 0;
+          sum += p[2];
+        }
+        return sum / this.ex.joints.length;
+      }
+      _pickSide(pts) {
+        const sL = this._sideScore(pts, "left");
+        const sR = this._sideScore(pts, "right");
+        const best = sL >= sR ? "left" : "right";
+        const bestSc = Math.max(sL, sR);
+        if (bestSc < VISIBLE_MEAN) return null;
+        if (this.side) {
+          const curSc = this.side === "left" ? sL : sR;
+          if (curSc >= VISIBLE_MEAN && bestSc - curSc < 0.15) return this.side;
+        }
+        return best;
+      }
+      _checkValue(chk, side, pts) {
+        const ps = chk.joints.map(j => this._pt(pts, side, j));
+        if (ps.some(p => !p)) return null;
+        const xy = ps.map(p => [p[0], p[1]]);
+        return chk.kind === "angle"
+          ? angleDeg(xy[0], xy[1], xy[2])
+          : tiltFromVertical(xy[0], xy[1]);
+      }
+      _violations(side, pts) {
+        const bad = [];
+        for (const chk of this.ex.checks || []) {
+          const raw = this._checkValue(chk, side, pts);
+          if (raw === null) continue;
+          const v = this.checkEma[chk.key].update(raw);
+          if ((chk.min !== null && chk.min !== undefined && v < chk.min) ||
+              (chk.max !== null && chk.max !== undefined && v > chk.max)) {
+            bad.push(chk);
+          }
+        }
+        return bad;
+      }
+      _flashNow(text, level, t, secs = 1.6) {
+        this.flash = { text, level, until: t + secs };
+      }
+      process(pts, t) {
+        const ex = this.ex;
+        const st = {
+          visible: false, side: null, angle: null, pct: 0,
+          phase: this.sm.state, cue: "", cue_level: "info",
+          triplet: null, issue_keys: [],
+          reps_in_set: this.repsInSet, set_no: this.setNo,
+          sets_total: this.sets, reps_target: this.repsPerSet,
+          resting: false, rest_left: 0, finished: this.finished,
+        };
+        if (this.finished) {
+          st.cue = "Workout complete - great job!";
+          st.cue_level = "ok";
+          return st;
+        }
+        const side = this._pickSide(pts);
+        if (!side) {
+          st.cue = `Step back - show your full body (${ex.view.toLowerCase()})`;
+          st.cue_level = "warn";
+          return st;
+        }
+        if (side !== this.side) {
+          this.angleEma.reset();
+          Object.values(this.checkEma).forEach(e => e.reset());
+          this.side = side;
+        }
+        const [a, b, c] = ex.joints.map(j => this._pt(pts, side, j));
+        const raw = angleDeg([a[0], a[1]], [b[0], b[1]], [c[0], c[1]]);
+        if (raw === null) return st;
+
+        const angle = this.angleEma.update(raw);
+        st.visible = true;
+        st.side = side;
+        st.angle = angle;
+        st.triplet = [[a[0], a[1]], [b[0], b[1]], [c[0], c[1]]];
+        const span = ex.extended_above - ex.flexed_below;
+        st.pct = Math.max(0, Math.min(1, (ex.extended_above - angle) / span));
+
+        const bad = this._violations(side, pts);
+        st.issue_keys = bad.map(x => x.key);
+
+        if (this.restUntil !== null) {
+          if (t < this.restUntil) {
+            st.resting = true;
+            st.rest_left = this.restUntil - t;
+            st.cue = `Rest - set ${this.setNo} starts in ${Math.floor(st.rest_left) + 1}s`;
+            st.cue_level = "info";
+            return st;
+          }
+          this.restUntil = null;
+          this.sm.reset();
+        }
+
+        const activeIssues = this.sm.state !== TOP ? new Set(st.issue_keys) : new Set();
+        const ev = this.sm.update(angle, t, activeIssues);
+        st.phase = this.sm.state;
+        if (ev) {
+          this._onEvent(ev, t);
+          st.reps_in_set = this.repsInSet;
+          st.set_no = this.setNo;
+          st.finished = this.finished;
+          st.phase = this.sm.state;
+        }
+        const [cue, lvl] = this._cue(st, bad, t);
+        st.cue = cue;
+        st.cue_level = lvl;
+        return st;
+      }
+      _onEvent(ev, t) {
+        const ex = this.ex;
+        const depth = (ex.extended_above - ev.min_angle) / (ex.extended_above - ex.flexed_below);
+        const counted = ev.kind === "rep";
+        const rec = {
+          set: this.setNo,
+          rep: counted ? this.repsInSet + 1 : null,
+          counted,
+          min_angle: Math.round(ev.min_angle * 10) / 10,
+          depth_pct: Math.round(Math.max(0, Math.min(depth, 1.2)) * 100),
+          duration_s: Math.round(ev.duration * 100) / 100,
+          issues: (ex.checks || []).filter(c => ev.issues.includes(c.key)).map(c => c.cue),
+        };
+        this.records.push(rec);
+
+        if (!counted) {
+          this._flashNow(`${ex.cue_low} (rep not counted)`, "warn", t, 2.0);
+          return;
+        }
+        this.repsInSet += 1;
+        const txt = rec.issues.length === 0
+          ? `Rep ${this.repsInSet} - nice depth`
+          : `Rep ${this.repsInSet} - ${rec.issues[0]}`;
+        this._flashNow(txt, rec.issues.length === 0 ? "ok" : "warn", t);
+
+        if (this.repsInSet >= this.repsPerSet) {
+          if (this.setNo >= this.sets) {
+            this.finished = true;
+          } else {
+            this.setNo += 1;
+            this.repsInSet = 0;
+            this.restUntil = t + this.restS;
+            this.sm.reset();
+          }
+        }
+      }
+      _cue(st, bad, t) {
+        if (this.flash && t < this.flash.until) return [this.flash.text, this.flash.level];
+        if (st.finished) return ["Workout complete - great job!", "ok"];
+        if (st.phase !== TOP && bad.length > 0) return [bad[0].cue, "warn"];
+        if (st.phase === BOTTOM) return ["Good depth - now drive up", "ok"];
+        if (st.phase === MOVING && st.angle !== null) {
+          if (st.angle > this.sm.minAngle + 12 && this.sm.minAngle > this.ex.flexed_below) {
+            return [this.ex.cue_low, "warn"];
+          }
+        }
+        return ["", "info"];
+      }
+      summary() {
+        const counted = this.records.filter(r => r.counted);
+        const partial = this.records.filter(r => !r.counted);
+        const issues = {};
+        for (const r of counted) {
+          for (const iss of r.issues) issues[iss] = (issues[iss] || 0) + 1;
+        }
+        const avgDepth = counted.length
+          ? Math.round(counted.reduce((a, r) => a + r.depth_pct, 0) / counted.length)
+          : 0;
+        const avgSec = counted.length
+          ? Math.round((counted.reduce((a, r) => a + r.duration_s, 0) / counted.length) * 100) / 100
+          : 0;
+        return {
+          exercise: this.ex.label,
+          view: this.ex.view,
+          plan: { sets: this.sets, reps_per_set: this.repsPerSet },
+          reps_counted: counted.length,
+          clean_reps: counted.filter(r => r.issues.length === 0).length,
+          partial_reps: partial.length,
+          avg_depth_pct: avgDepth,
+          avg_rep_seconds: avgSec,
+          form_issue_counts: issues,
+          sets_completed: this.setNo - 1 + (this.finished ? 1 : 0),
+          records: this.records,
+        };
+      }
+    }
+
+    // ---------------- Canvas Overlay ----------------
+    function drawText(ctx, s, x, y, px, color = COLORS.white, align = "left") {
+      ctx.font = `700 ${Math.round(px)}px system-ui, -apple-system, sans-serif`;
+      ctx.textAlign = align;
+      ctx.textBaseline = "alphabetic";
+      ctx.lineWidth = Math.max(3, Math.round(px * 0.18));
+      ctx.strokeStyle = COLORS.dark;
+      ctx.strokeText(s, x, y);
+      ctx.fillStyle = color;
+      ctx.fillText(s, x, y);
+    }
+
+    function drawOverlay(ctx, w, h, st, ex, pts, paused) {
+      const k = Math.max(h / 720, 0.6);
+      const bad = st.issue_keys.length > 0 && st.phase !== TOP;
+      const skelCol = bad ? COLORS.red : COLORS.white;
+
+      ctx.lineWidth = 3;
+      ctx.strokeStyle = skelCol;
+      for (const [a, b] of CONNECTIONS) {
+        const pa = pts[a], pb = pts[b];
+        if (pa && pb && pa[2] > 0.3 && pb[2] > 0.3) {
+          ctx.beginPath();
+          ctx.moveTo(pa[0], pa[1]);
+          ctx.lineTo(pb[0], pb[1]);
+          ctx.stroke();
+        }
+      }
+      for (const p of Object.values(pts)) {
+        if (p[2] > 0.3) {
+          ctx.beginPath();
+          ctx.arc(p[0], p[1], 5, 0, Math.PI * 2);
+          ctx.fillStyle = COLORS.dark;
+          ctx.fill();
+          ctx.beginPath();
+          ctx.arc(p[0], p[1], 3, 0, Math.PI * 2);
+          ctx.fillStyle = skelCol;
+          ctx.fill();
+        }
+      }
+
+      if (st.visible && st.triplet) {
+        const [a, b, c] = st.triplet;
+        const g = ex.moving_end === "a"
+          ? ghostLimbEnd(c, b, a, ex.flexed_below)
+          : ghostLimbEnd(a, b, c, ex.flexed_below);
+        if (g) {
+          const gCol = st.pct >= 1 ? COLORS.green : COLORS.ghost;
+          ctx.save();
+          ctx.setLineDash([12, 10]);
+          ctx.lineWidth = Math.max(2, 3 * k);
+          ctx.strokeStyle = gCol;
+          ctx.beginPath();
+          ctx.moveTo(b[0], b[1]);
+          ctx.lineTo(g[0], g[1]);
+          ctx.stroke();
+          ctx.restore();
+
+          ctx.beginPath();
+          ctx.arc(g[0], g[1], 11 * k, 0, Math.PI * 2);
+          ctx.lineWidth = 2;
+          ctx.strokeStyle = gCol;
+          ctx.stroke();
+        }
+
+        const lc = st.pct >= 1 ? COLORS.green : COLORS.amber;
+        ctx.lineWidth = 5 * k;
+        ctx.strokeStyle = lc;
+        ctx.beginPath();
+        ctx.moveTo(a[0], a[1]);
+        ctx.lineTo(b[0], b[1]);
+        ctx.lineTo(c[0], c[1]);
+        ctx.stroke();
+
+        ctx.beginPath();
+        ctx.arc(b[0], b[1], 9 * k, 0, Math.PI * 2);
+        ctx.fillStyle = lc;
+        ctx.fill();
+
+        drawText(ctx, `${Math.round(st.angle)}°`, b[0] + 16 * k, b[1] - 10 * k, 26 * k, lc, "left");
+
+        // Vertical depth gauge
+        const bw = Math.round(34 * k), top = Math.round(h * 0.22), bot = Math.round(h * 0.80);
+        const gx = w - Math.round(70 * k);
+        ctx.fillStyle = "rgba(20, 20, 20, 0.55)";
+        ctx.fillRect(gx - 8, top - 34 * k, bw + 16, bot - top + 52 * k);
+        ctx.strokeStyle = "rgb(90,90,90)";
+        ctx.lineWidth = 2;
+        ctx.strokeRect(gx, top, bw, bot - top);
+
+        const fillTop = Math.round(bot - (bot - top) * st.pct);
+        const gCol = st.pct >= 1 ? COLORS.green : (st.pct >= 0.6 ? COLORS.amber : COLORS.red);
+        ctx.fillStyle = gCol;
+        ctx.fillRect(gx + 2, fillTop, bw - 4, Math.max(0, bot - 2 - fillTop));
+
+        ctx.strokeStyle = COLORS.green;
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        ctx.moveTo(gx - 10, top);
+        ctx.lineTo(gx + bw + 10, top);
+        ctx.stroke();
+
+        drawText(ctx, "TARGET", gx + bw / 2, top - 10 * k, 13 * k, COLORS.green, "center");
+        drawText(ctx, `${Math.round(st.pct * 100)}%`, gx + bw / 2, bot + 26 * k, 18 * k, gCol, "center");
+      }
+
+      // HUD top-left
+      ctx.fillStyle = "rgba(20, 20, 20, 0.55)";
+      ctx.fillRect(12, 12, 330 * k, 112 * k);
+      drawText(ctx, ex.label.toUpperCase(), 26, 44 * k, 26 * k, COLORS.white, "left");
+      drawText(ctx, `SET ${st.set_no}/${st.sets_total}`, 26, 80 * k, 22 * k, COLORS.amber, "left");
+      drawText(ctx, `REP ${st.reps_in_set}/${st.reps_target}`, 26, 112 * k, 22 * k, COLORS.green, "left");
+
+      // Bottom-center cue
+      if (st.cue) {
+        const fontPx = Math.round(27 * k);
+        ctx.font = `700 ${fontPx}px system-ui, -apple-system, sans-serif`;
+        const tw = ctx.measureText(st.cue).width;
+        const th = fontPx;
+        const px = (w - tw) / 2 - 20;
+        const py = h - 95 * k;
+        ctx.fillStyle = "rgba(20, 20, 20, 0.65)";
+        ctx.fillRect(px, py, tw + 40, th + 24 * k);
+        const cCol = st.cue_level === "ok" ? COLORS.green : (st.cue_level === "warn" ? COLORS.amber : COLORS.white);
+        drawText(ctx, st.cue, w / 2, py + th + 6 * k, fontPx, cCol, "center");
+      }
+
+      if (paused) {
+        ctx.fillStyle = "rgba(20, 20, 20, 0.45)";
+        ctx.fillRect(0, 0, w, h);
+        drawText(ctx, "PAUSED", w / 2, h / 2, 56 * k, COLORS.amber, "center");
+      }
+    }
+
+    // ---------------- App Runtime ----------------
+    const video = document.getElementById("video");
+    const canvas = document.getElementById("canvas");
+    const ctx2d = canvas.getContext("2d");
+    const msgEl = document.getElementById("msg");
+    const statusBadge = document.getElementById("statusBadge");
+    const btnPause = document.getElementById("btnPause");
+    const btnEnd = document.getElementById("btnEnd");
+    const btnFs = document.getElementById("btnFs");
+
+    let landmarker = null;
+    let engine = null;
+    let paused = false;
+    let stream = null;
+    let rafId = null;
+    let lastVideoTime = -1;
+    let lastPts = {};
+    let currentCfgKey = null;
+
+    function setStatus(text, cls = "") {
+      statusBadge.textContent = text;
+      statusBadge.className = `status ${cls}`.trim();
+    }
+
+    btnPause.addEventListener("click", () => {
+      paused = !paused;
+      btnPause.textContent = paused ? "▶ Resume" : "⏸ Pause";
+    });
+
+    btnFs.addEventListener("click", () => {
+      const stage = document.getElementById("stage");
+      if (!document.fullscreenElement) stage.requestFullscreen?.();
+      else document.exitFullscreen?.();
+    });
+
+    btnEnd.addEventListener("click", () => {
+      if (rafId) cancelAnimationFrame(rafId);
+      if (stream) stream.getTracks().forEach(t => t.stop());
+      const summary = engine ? engine.summary() : { records: [] };
+      post("streamlit:setComponentValue", { value: summary });
+    });
+
+    async function initPoseAndCamera() {
+      try {
+        setStatus("Loading pose model…");
+        const vision = await FilesetResolver.forVisionTasks(
+          "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/wasm"
+        );
+        landmarker = await PoseLandmarker.createFromOptions(vision, {
+          baseOptions: {
+            modelAssetPath:
+              "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/latest/pose_landmarker_lite.task",
+            delegate: "GPU",
+          },
+          runningMode: "VIDEO",
+          numPoses: 1,
+          minPoseDetectionConfidence: 0.5,
+          minPosePresenceConfidence: 0.5,
+          minTrackingConfidence: 0.5,
+        });
+      } catch (gpuErr) {
+        try {
+          const vision = await FilesetResolver.forVisionTasks(
+            "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/wasm"
+          );
+          landmarker = await PoseLandmarker.createFromOptions(vision, {
+            baseOptions: {
+              modelAssetPath:
+                "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/latest/pose_landmarker_lite.task",
+              delegate: "CPU",
+            },
+            runningMode: "VIDEO",
+            numPoses: 1,
+            minPoseDetectionConfidence: 0.5,
+            minPosePresenceConfidence: 0.5,
+            minTrackingConfidence: 0.5,
+          });
+        } catch (err) {
+          setStatus("Model failed", "err");
+          msgEl.textContent = `Could not load pose model in browser: ${err?.message || err}`;
+          msgEl.classList.remove("hidden");
+          return;
+        }
+      }
+
+      try {
+        setStatus("Starting camera…");
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: "user" },
+          audio: false,
+        });
+        video.srcObject = stream;
+        await video.play();
+        canvas.width = video.videoWidth || 1280;
+        canvas.height = video.videoHeight || 720;
+        msgEl.classList.add("hidden");
+        setStatus("Live (browser)", "ok");
+        loop();
+      } catch (camErr) {
+        setStatus("Camera blocked", "err");
+        msgEl.textContent = `Camera access error: ${camErr?.message || camErr}. Allow camera permissions and reload.`;
+        msgEl.classList.remove("hidden");
+      }
+    }
+
+    function loop() {
+      rafId = requestAnimationFrame(loop);
+      if (!video.videoWidth || !landmarker || !engine) return;
+      if (canvas.width !== video.videoWidth || canvas.height !== video.videoHeight) {
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
+      }
+      const w = canvas.width, h = canvas.height;
+
+      // Mirror video onto canvas
+      ctx2d.save();
+      ctx2d.scale(-1, 1);
+      ctx2d.drawImage(video, -w, 0, w, h);
+      ctx2d.restore();
+
+      const nowMs = performance.now();
+      if (video.currentTime !== lastVideoTime) {
+        lastVideoTime = video.currentTime;
+        const res = landmarker.detectForVideo(video, nowMs);
+        const nextPts = {};
+        if (res.landmarks && res.landmarks.length > 0) {
+          const lms = res.landmarks[0];
+          for (const [name, idx] of Object.entries(LANDMARKS)) {
+            const lm = lms[idx];
+            if (lm) {
+              // Mirror x coordinate to match mirrored canvas
+              nextPts[name] = [(1 - lm.x) * w, lm.y * h, lm.visibility ?? 0];
+            }
+          }
+        }
+        lastPts = nextPts;
+      }
+      const pts = lastPts;
+
+      let st;
+      if (paused) {
+        st = {
+          visible: false, side: null, angle: null, pct: 0,
+          phase: engine.sm.state, cue: "", cue_level: "info",
+          triplet: null, issue_keys: [],
+          reps_in_set: engine.repsInSet, set_no: engine.setNo,
+          sets_total: engine.sets, reps_target: engine.repsPerSet,
+          resting: false, rest_left: 0, finished: engine.finished,
+        };
+      } else {
+        st = engine.process(pts, nowMs / 1000);
+      }
+
+      drawOverlay(ctx2d, w, h, st, engine.ex, pts, paused);
+    }
+
+    window.addEventListener("message", (event) => {
+      const data = event.data;
+      if (!data || data.type !== "streamlit:render") return;
+      const args = data.args || {};
+      if (!args.exercise) return;
+      const key = `${args.exercise.key}_${args.reps}_${args.sets}_${args.rest_s}`;
+      if (key !== currentCfgKey) {
+        currentCfgKey = key;
+        engine = new CoachEngine(args.exercise, args.reps, args.sets, args.rest_s);
+      }
+    });
+
+    post("streamlit:componentReady", { apiVersion: 1 });
+    updateHeight();
+    initPoseAndCamera();
+  </script>
+</body>
+</html>
