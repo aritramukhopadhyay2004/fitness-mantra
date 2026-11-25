@@ -1,6 +1,10 @@
 """AI Fitness Coach - Streamlit app.  Run:  streamlit run app.py
 
-Flow: choose exercise -> live browser pose tracking + real-time Gemini coaching -> datewise records & summary.
+Pages:
+- select (Home): choose exercise + "Records" button
+- train: live browser pose tracking + real-time Gemini coaching + Exit button
+- summary: end-of-session metrics, achievements/records met, final coach summary, Back to Home
+- records: dedicated Datewise Training Records page (Session summary, Achievements & Records Met, Final Coach Summary)
 """
 from __future__ import annotations
 
@@ -52,44 +56,28 @@ header[data-testid="stHeader"], footer {display:none;}
 """
 
 
-def render_datewise_records(store: dict) -> None:
-    by_date = store.get("by_date", {})
-    prs = store.get("personal_records", {})
-    if not by_date:
-        return
-
-    st.subheader("Datewise Training Records")
-    if prs:
-        pr_cols = st.columns(len(prs))
-        for col, (ex_name, pr) in zip(pr_cols, prs.items()):
-            col.metric(
-                f"{ex_name} PR",
-                f"{pr.get('best_reps_in_session', 0)} reps",
-                f"Best depth: {pr.get('best_depth_pct', 0)}%",
-            )
-
-    for date_key in sorted(by_date.keys(), reverse=True):
-        sessions = by_date[date_key]
-        with st.expander(f"{date_key} ({len(sessions)} session{'s' if len(sessions) != 1 else ''})", expanded=(date_key == sorted(by_date.keys(), reverse=True)[0])):
-            for idx, entry in enumerate(reversed(sessions), 1):
-                st.markdown(
-                    f"**#{idx} · {entry.get('time', '')} — {entry.get('exercise', '')}** "
-                    f"({entry.get('reps_counted', 0)} reps, {entry.get('clean_reps', 0)} clean, "
-                    f"avg depth {entry.get('avg_depth_pct', 0)}%)"
-                )
-                if entry.get("achievements"):
-                    st.caption("Achievements: " + " | ".join(entry["achievements"]))
-                if entry.get("live_suggestions"):
-                    with st.popover(f"View {len(entry['live_suggestions'])} live suggestions"):
-                        for s in entry["live_suggestions"]:
-                            st.write(f"- **[{s.get('time', '')}] Set {s.get('set', 1)}, Rep {s.get('rep', 0)}**: {s.get('suggestion', '')}")
-                if entry.get("final_feedback"):
-                    st.info(entry["final_feedback"])
+def _reset_session_buffers() -> None:
+    ss.update(
+        summary=None,
+        feedback=None,
+        live_suggestions=[],
+        achievements=[],
+        awarded_keys=set(),
+        live_bests={},
+        latest_achievement="",
+        last_event_id=None,
+        live_ai_tip="",
+    )
 
 
-# ------------------------------------------------------------------ select page
+# ------------------------------------------------------------------ home page
 def page_select() -> None:
-    st.title("\U0001F3CB AI Fitness Coach")
+    h1, h2 = st.columns([5, 1.3])
+    h1.title("\U0001F3CB AI Fitness Coach")
+    if h2.button("\U0001F4C5 Records", use_container_width=True):
+        ss.stage = "records"
+        st.rerun()
+
     st.caption(
         f"{len(EXERCISES)} exercises across Upper Body, Lower Body, Core, Conditioning & Mobility — "
         "tuned with ACSM/NSCA biomechanics, live Gemini coaching & datewise records."
@@ -119,7 +107,6 @@ def page_select() -> None:
 
     if not pool:
         st.warning("No exercises match those filters. Try resetting one of the filters above.")
-        render_datewise_records(ss.training_store)
         return
 
     keys = [e.key for e in pool]
@@ -161,30 +148,29 @@ def page_select() -> None:
             st.caption(f"Biomechanics: {ex.biomechanics_note}")
 
     if st.button("▶  Start training", type="primary", use_container_width=True):
+        _reset_session_buffers()
         ss.update(
             stage="train",
             cfg=dict(key=key, reps=int(reps), sets=int(sets), rest=int(rest)),
             language=lang,
-            summary=None,
-            feedback=None,
-            live_suggestions=[],
-            achievements=[],
-            awarded_keys=set(),
-            live_bests={},
-            latest_achievement="",
-            last_event_id=None,
-            live_ai_tip="",
         )
         st.rerun()
-
-    render_datewise_records(ss.training_store)
 
 
 # ------------------------------------------------------------------ train page
 def page_train() -> None:
     st.markdown(FULLSCREEN_CSS, unsafe_allow_html=True)
     cfg = ss.cfg
-    ex_dict = asdict(EXERCISES[cfg["key"]])
+    ex = EXERCISES[cfg["key"]]
+
+    t1, t2 = st.columns([6, 1.3])
+    t1.markdown(f"### {ex.label} — {ex.muscle_group}")
+    if t2.button("← Exit to Home", use_container_width=True):
+        _reset_session_buffers()
+        ss.stage = "select"
+        st.rerun()
+
+    ex_dict = asdict(ex)
     payload = _browser_tracker(
         exercise=ex_dict,
         reps=cfg["reps"],
@@ -242,6 +228,10 @@ def page_train() -> None:
             ss.summary = summary
             ss.stage = "summary"
             st.rerun()
+        elif event == "exit" and event_id and event_id != ss.last_event_id:
+            _reset_session_buffers()
+            ss.stage = "select"
+            st.rerun()
 
     if ss.latest_achievement:
         st.success(f"Latest Achievement / Record: {ss.latest_achievement}")
@@ -296,21 +286,77 @@ def page_summary() -> None:
                 for item in ss.live_suggestions:
                     st.write(f"- **[{item['time']}] Set {item['set']}, Rep {item['rep']}**: {item['suggestion']}")
 
-    render_datewise_records(ss.training_store)
-
-    if st.button("↺ Train again"):
-        ss.update(
-            stage="select",
-            feedback=None,
-            live_suggestions=[],
-            achievements=[],
-            awarded_keys=set(),
-            live_bests={},
-            latest_achievement="",
-            last_event_id=None,
-            live_ai_tip="",
-        )
+    b1, b2, _ = st.columns([1.4, 1.4, 3])
+    if b1.button("🏠 Back to Home", type="primary", use_container_width=True):
+        _reset_session_buffers()
+        ss.stage = "select"
+        st.rerun()
+    if b2.button("📅 View All Records", use_container_width=True):
+        _reset_session_buffers()
+        ss.stage = "records"
         st.rerun()
 
 
-{"select": page_select, "train": page_train, "summary": page_summary}[ss.stage]()
+# ---------------------------------------------------------------- records page
+def page_records() -> None:
+    r1, r2 = st.columns([5, 1.3])
+    r1.title("\U0001F4C5 Datewise Training Records")
+    if r2.button("← Back to Home", use_container_width=True):
+        ss.stage = "select"
+        st.rerun()
+
+    store = ss.training_store
+    by_date = store.get("by_date", {})
+    prs = store.get("personal_records", {})
+
+    if prs:
+        st.subheader("Personal Records (All-Time)")
+        cols = st.columns(min(len(prs), 4))
+        for idx, (ex_name, pr) in enumerate(prs.items()):
+            cols[idx % len(cols)].metric(
+                f"{ex_name} PR",
+                f"{pr.get('best_reps_in_session', 0)} reps",
+                f"Best depth: {pr.get('best_depth_pct', 0)}% · {pr.get('total_sessions', 0)} sessions",
+            )
+
+    if not by_date:
+        st.info("No completed training sessions yet. Complete a workout from Home to see your datewise records here.")
+        return
+
+    dates = sorted(by_date.keys(), reverse=True)
+    for date_key in dates:
+        sessions = by_date[date_key]
+        with st.expander(
+            f"{date_key} — {len(sessions)} session{'s' if len(sessions) != 1 else ''}",
+            expanded=(date_key == dates[0]),
+        ):
+            for idx, entry in enumerate(reversed(sessions), 1):
+                with st.container(border=True):
+                    st.markdown(f"### #{idx} · {entry.get('exercise', '')} ({entry.get('time', '')})")
+
+                    st.markdown("**Session summary**")
+                    m = st.columns(5)
+                    m[0].metric("Reps counted", entry.get("reps_counted", 0))
+                    m[1].metric("Clean-form reps", entry.get("clean_reps", 0))
+                    m[2].metric("Partial reps", entry.get("partial_reps", 0))
+                    m[3].metric("Avg depth", f"{entry.get('avg_depth_pct', 0)}%")
+                    m[4].metric("Avg rep (s)", f"{entry.get('avg_rep_seconds', 0)}")
+
+                    if entry.get("achievements"):
+                        st.markdown("**Achievements & Records Met**")
+                        for ach in entry["achievements"]:
+                            st.success(ach)
+
+                    if entry.get("final_feedback"):
+                        st.markdown("**Final Coach Summary**")
+                        st.info(entry["final_feedback"])
+                        if entry.get("feedback_source"):
+                            st.caption(f"Source: {entry['feedback_source']}")
+
+                    if entry.get("live_suggestions"):
+                        with st.expander(f"Real-time suggestions ({len(entry['live_suggestions'])})", expanded=False):
+                            for s in entry["live_suggestions"]:
+                                st.write(f"- **[{s.get('time', '')}] Set {s.get('set', 1)}, Rep {s.get('rep', 0)}**: {s.get('suggestion', '')}")
+
+
+{"select": page_select, "train": page_train, "summary": page_summary, "records": page_records}[ss.stage]()

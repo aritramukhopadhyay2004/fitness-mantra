@@ -102,6 +102,7 @@
     <div class="toolbar">
       <button id="btnPause" type="button">⏸ Pause</button>
       <button id="btnEnd" class="primary" type="button">⏹ End session</button>
+      <button id="btnExit" type="button">✕ Exit</button>
       <button id="btnFs" type="button">⛶ Fullscreen</button>
       <span id="statusBadge" class="status">Initializing…</span>
     </div>
@@ -751,6 +752,7 @@
     const statusBadge = document.getElementById("statusBadge");
     const btnPause = document.getElementById("btnPause");
     const btnEnd = document.getElementById("btnEnd");
+    const btnExit = document.getElementById("btnExit");
     const btnFs = document.getElementById("btnFs");
     const coachTipEl = document.getElementById("coachTip");
 
@@ -788,6 +790,17 @@
           event: "end",
           event_id: `end_${Date.now()}`,
           summary,
+        },
+      });
+    });
+
+    btnExit.addEventListener("click", () => {
+      if (rafId) cancelAnimationFrame(rafId);
+      if (stream) stream.getTracks().forEach(t => t.stop());
+      post("streamlit:setComponentValue", {
+        value: {
+          event: "exit",
+          event_id: `exit_${Date.now()}`,
         },
       });
     });
