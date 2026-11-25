@@ -40,6 +40,7 @@ def check_live_achievements(
     snapshot: dict[str, Any],
     store: dict[str, Any],
     already_awarded: set[str],
+    live_bests: dict[str, int] | None = None,
 ) -> list[str]:
     """Check for real-time achievements & personal records met during a live workout."""
     ex_name = snapshot.get("exercise", "Exercise")
@@ -50,6 +51,7 @@ def check_live_achievements(
     clean_streak = int(snapshot.get("clean_streak", 0))
     depth_pct = int(last_rep.get("depth_pct", 0))
     counted = bool(last_rep.get("counted", False))
+    bests = live_bests if live_bests is not None else {}
 
     new_hits: list[str] = []
 
@@ -62,8 +64,10 @@ def check_live_achievements(
         award("first_rep", f"First {ex_name} rep completed!")
     if clean_streak >= 3:
         award(f"streak_{clean_streak}", f"{clean_streak} clean-form reps in a row!")
-    if counted and depth_pct >= 100 and depth_pct > int(prs.get("best_depth_pct", 0)):
-        award(f"depth_pr_{depth_pct}", f"New depth record: {depth_pct}%!")
+    prev_best_depth = max(int(prs.get("best_depth_pct", 0)), int(bests.get("best_depth_pct", 0)))
+    if counted and depth_pct >= 100 and depth_pct > prev_best_depth:
+        bests["best_depth_pct"] = depth_pct
+        new_hits.append(f"New depth record: {depth_pct}%!")
     if reps_counted > int(prs.get("best_reps_in_session", 0)) and int(prs.get("best_reps_in_session", 0)) > 0:
         award("rep_pr", f"New session rep record: {reps_counted} reps!")
     if clean_reps > int(prs.get("best_clean_reps", 0)) and int(prs.get("best_clean_reps", 0)) > 0:

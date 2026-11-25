@@ -28,6 +28,8 @@ ss.setdefault("summary", None)
 ss.setdefault("live_suggestions", [])
 ss.setdefault("achievements", [])
 ss.setdefault("awarded_keys", set())
+ss.setdefault("live_bests", {})
+ss.setdefault("latest_achievement", "")
 ss.setdefault("last_event_id", None)
 ss.setdefault("live_ai_tip", "")
 ss.setdefault("training_store", load_records())
@@ -114,6 +116,8 @@ def page_select() -> None:
             live_suggestions=[],
             achievements=[],
             awarded_keys=set(),
+            live_bests={},
+            latest_achievement="",
             last_event_id=None,
             live_ai_tip="",
         )
@@ -142,8 +146,10 @@ def page_train() -> None:
         if event == "rep" and event_id and event_id != ss.last_event_id:
             ss.last_event_id = event_id
             snap = payload.get("snapshot") or {}
-            new_hits = check_live_achievements(snap, ss.training_store, ss.awarded_keys)
-            ss.achievements.extend(new_hits)
+            new_hits = check_live_achievements(snap, ss.training_store, ss.awarded_keys, ss.live_bests)
+            if new_hits:
+                ss.achievements.extend(new_hits)
+                ss.latest_achievement = new_hits[-1]
             tip, src = live_coach_tip(snap, new_hits, api_key(), ss.language)
             ss.live_ai_tip = tip
             ss.live_suggestions.append(
@@ -183,12 +189,8 @@ def page_train() -> None:
             ss.stage = "summary"
             st.rerun()
 
-    if ss.achievements:
-        st.success("Achievements & Records: " + " · ".join(ss.achievements))
-    if ss.live_suggestions:
-        with st.expander(f"Live Coach Log ({len(ss.live_suggestions)} updates)", expanded=False):
-            for s in reversed(ss.live_suggestions[-10:]):
-                st.write(f"**[{s['time']}] Set {s['set']}, Rep {s['rep']}** ({s['source']}): {s['suggestion']}")
+    if ss.latest_achievement:
+        st.success(f"Latest Achievement / Record: {ss.latest_achievement}")
 
 
 # ---------------------------------------------------------------- summary page
@@ -249,6 +251,8 @@ def page_summary() -> None:
             live_suggestions=[],
             achievements=[],
             awarded_keys=set(),
+            live_bests={},
+            latest_achievement="",
             last_event_id=None,
             live_ai_tip="",
         )
